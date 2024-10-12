@@ -1,0 +1,89 @@
+#!/bin/bash
+
+# Define variables
+MASTER_KEY=""  # Encryption key for backups (can be empty if not provided)
+BACKUP_DIR="$HOME/.bitwarden"  # Backup folder
+LOG_FILE="$BACKUP_DIR/decrypt.log"  # Log file for decryption errors
+
+# Function to log errors
+log_error() {
+  echo "$(date +%Y-%m-%d_%H:%M:%S) - $1" >> "$LOG_FILE"
+}
+
+# Check if there are any encrypted backup files
+ENCRYPTED_FILES=($(ls "$BACKUP_DIR"/*.enc 2>/dev/null))
+if [ ${#ENCRYPTED_FILES[@]} -eq 0 ]; then
+  echo "No encrypted backup files found in $BACKUP_DIR."
+  exit 1
+fi
+
+# Use fzf for file selection if available, otherwise use plain ls
+if command -v fzf &> /dev/null; then
+  SELECTED_FILE=$(ls "$BACKUP_DIR"/*.enc | fzf --prompt="Select backup file to decrypt: ")
+else
+  echo "Available encrypted backup files:"
+  ls "$BACKUP_DIR"/*.enc
+  read -p "Enter the file name (with full path) you want to decrypt: " SELECTED_FILE
+fi
+
+if [ ! -f "$SELECTED_FILE" ]; then
+  echo "Error: File not found."
+  log_error "File not found: $SELECTED_FILE."
+  exit 1
+fi
+
+# Prompt for the decryption key if MASTER_KEY is empty or doesn't work
+try_decrypt() {
+  openssl enc -aes-256-cbc -d -in "$SELECTED_FILE" -out "${SELECTED_FILE%.enc}.json" -pass pass:"$1" 2>/dev/null
+}
+
+# Function to handle failed decryption
+handle_failure() {
+  DECRYPTED_FILE="${SELECTED_FILE%.enc}.json"
+  if [ -f "$DECRYPTED_FILE" ]; then
+    # If the file exists but is invalid, rename it or delete it
+    if ! jq . "$DECRYPTED_FILE" > /dev/null 2>&1; then
+      echo "Decrypted file is invalid."
+      read -p "Do you want to delete the invalid file? (y/n): " DELETE_INVALID
+      if [[ "$DELETE_INVALID" == "y" ]]; then
+        rm "$DECRYPTED_FILE"
+        echo "Invalid decrypted file deleted."
+      else
+        mv "$DECRYPTED_FILE" "${DECRYPTED_FILE%.json}.failed"
+        echo "Invalid file renamed to ${DECRYPTED_FILE%.json}.failed."
+      fi
+    fi
+  fi
+}
+
+if [ -n "$MASTER_KEY" ]; then
+  echo "Attempting to decrypt with provided MASTER_KEY..."
+  try_decrypt "$MASTER_KEY"
+  if [ $? -ne 0 ]; then
+    echo "Decryption with MASTER_KEY failed."
+    MASTER_KEY=""
+    handle_failure
+  else
+    echo "Decryption successful with provided MASTER_KEY."
+    exit 0
+  fi
+fi
+
+# Ask for the password if MASTER_KEY was empty or failed
+while [ -z "$MASTER_KEY" ]; do
+  read -sp "Enter decryption password: " USER_PASSWORD
+  echo
+  try_decrypt "$USER_PASSWORD"
+  if [ $? -eq 0 ]; then
+    echo "Decryption successful with entered password."
+    exit 0
+  else
+    echo "Decryption failed. Try again."
+    handle_failure
+  fi
+done
+
+# If all else fails
+echo "Error: Failed to decrypt the file."
+log_error "Decryption failed for file $SELECTED_FILE."
+exit 1

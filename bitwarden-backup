@@ -1,0 +1,71 @@
+#!/bin/bash
+
+# Define variables
+EMAIL=""  # Your Bitwarden email
+PASSWORD=""  # Your Bitwarden password
+MASTER_PASSWORD=""  # Your Bitwarden master password
+MASTER_KEY=""  # Encryption key for backups
+BACKUP_DIR="$HOME/.bitwarden"  # Backup folder
+DATE=$(date +%Y-%m-%d)  # Get current date in YYYY-MM-DD format
+BACKUP_FILE="bitwarden_backup_$DATE.json"
+ENCRYPTED_FILE="bitwarden_backup_$DATE.json.enc"  # Encrypted backup file
+LOG_FILE="$BACKUP_DIR/bitwarden_backup_$DATE.log"  # Log file for errors
+SESSION_FILE="$BACKUP_DIR/.bw_session"  # File to store Bitwarden session key
+
+# Create the hidden backup folder if it doesn't exist
+mkdir -p "$BACKUP_DIR"
+
+# Function to log errors
+log_error() {
+  echo "$(date +%Y-%m-%d_%H:%M:%S) - $1" >> "$LOG_FILE"
+}
+
+# Check if you are logged in but locked
+bw status | grep -q '"status":"locked"'
+if [ $? -eq 0 ]; then
+  echo "Vault is locked. Unlocking the vault..."
+  # Unlock the vault using the master password
+  SESSION_KEY=$(bw unlock "$MASTER_PASSWORD" --raw)
+  if [ -z "$SESSION_KEY" ]; then
+    echo "Error: Failed to unlock the vault."
+    log_error "Failed to unlock the vault for user $EMAIL."
+    exit 1
+  fi
+  echo "$SESSION_KEY" > "$SESSION_FILE"
+else
+  # Check if you are already logged in and unlocked
+  bw status | grep -q '"status":"unauthenticated"'
+  if [ $? -eq 0 ]; then
+    echo "Not logged in. Logging in now..."
+    SESSION_KEY=$(bw login "$EMAIL" "$PASSWORD" --raw)
+    if [ -z "$SESSION_KEY" ]; then
+      echo "Error: Bitwarden login failed."
+      log_error "Bitwarden login failed for user $EMAIL."
+      exit 1
+    fi
+    echo "$SESSION_KEY" > "$SESSION_FILE"
+  fi
+fi
+
+# Sync Bitwarden and export the vault in JSON format
+bw sync --session "$SESSION_KEY" || { echo "Error: Failed to sync vault."; log_error "Bitwarden sync failed."; exit 1; }
+bw export --session "$SESSION_KEY" --output "$BACKUP_DIR/$BACKUP_FILE" --format json || { echo "Error: Failed to export vault."; log_error "Vault export failed."; exit 1; }
+
+# Encrypt the JSON backup with OpenSSL and your master key
+openssl enc -aes-256-cbc -salt -in "$BACKUP_DIR/$BACKUP_FILE" -out "$BACKUP_DIR/$ENCRYPTED_FILE" -pass pass:"$MASTER_KEY" || { echo "Error: Encryption failed."; log_error "Vault encryption failed."; exit 1; }
+
+# Optionally remove the original JSON file after encryption
+rm "$BACKUP_DIR/$BACKUP_FILE"
+
+# Optional: Clean up backups older than 7 days
+find "$BACKUP_DIR" -type f -name "*.enc" -mtime +7 -delete || { echo "Error: Failed to clean up old backups."; log_error "Backup cleanup failed."; }
+
+# Delete the session key file to force login next time
+if [ -f "$SESSION_FILE" ]; then
+  rm "$SESSION_FILE" || { echo "Error: Failed to delete session key."; log_error "Failed to delete session key."; }
+fi
+
+# Logout of Bitwarden (cleaning up)
+bw logout || { echo "Error: Bitwarden logout failed."; log_error "Bitwarden logout failed."; }
+
+echo "Backup and encryption complete! Backup is stored in $BACKUP_DIR."
