@@ -11,19 +11,31 @@ log_error() {
 }
 
 # Check if there are any encrypted backup files
-ENCRYPTED_FILES=($(ls "$BACKUP_DIR"/*.enc 2>/dev/null))
+mapfile -t ENCRYPTED_FILES < <(find "$BACKUP_DIR" -type f -name "*.enc" 2>/dev/null)
 if [ ${#ENCRYPTED_FILES[@]} -eq 0 ]; then
   echo "No encrypted backup files found in $BACKUP_DIR."
   exit 1
 fi
 
-# Use fzf for file selection if available, otherwise use plain ls
+# Use fzf for file selection if available, otherwise list files and ask for input
 if command -v fzf &> /dev/null; then
-  SELECTED_FILE=$(ls "$BACKUP_DIR"/*.enc | fzf --prompt="Select backup file to decrypt: ")
+  SELECTED_FILE=$(printf '%s\n' "${ENCRYPTED_FILES[@]}" | fzf --prompt="Select backup file to decrypt: ")
+  
+  # Check if the user cancelled out (fzf returns empty string)
+  if [ -z "$SELECTED_FILE" ]; then
+    echo "File selection cancelled."
+    exit 0
+  fi
 else
   echo "Available encrypted backup files:"
-  ls "$BACKUP_DIR"/*.enc
+  printf '%s\n' "${ENCRYPTED_FILES[@]}"
   read -p "Enter the file name (with full path) you want to decrypt: " SELECTED_FILE
+  
+  # Check if the user pressed Ctrl+C or just entered nothing
+  if [ -z "$SELECTED_FILE" ]; then
+    echo "File selection cancelled."
+    exit 0
+  fi
 fi
 
 if [ ! -f "$SELECTED_FILE" ]; then
